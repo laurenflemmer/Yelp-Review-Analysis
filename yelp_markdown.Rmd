@@ -1,0 +1,462 @@
+
+# An Analysis of Yelp Reviews
+## Lauren Flemmer
+
+
+```{r, results="hide", echo=FALSE, warning=FALSE, include=FALSE}
+#load packages
+library(InformationValue)
+library(ROSE)
+library(ggforce)
+library(boot)
+library(rlang)
+library(stopwords)
+library(devtools)
+library(tidytext)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(gridExtra)
+library(maps)
+library(mapproj)
+
+
+
+#read in data
+business <- read.csv(file = "/Users/laurenflemmer/Desktop/Projects/yelpdata/yelp_training_set_business.csv")
+review <- read.csv(file = "/Users/laurenflemmer/Desktop/Projects/yelpdata/yelp_training_set_review.csv")
+
+```
+ 
+## Main Question
+#### Can we predict the sentiment of a review from its rating?
+
+
+## Outline
+* Overview of the Data
+* Data Visualization
+* Model Building
+* Model Validation/Selection
+* A Closer Look at the Results
+* Conclusions
+
+## Data
+
+I am utilizing __2 Yelp datasets__ highlighting the Phoenix, AZ metropolitan area
+* The first describes each business: including its name, location, type, rating, etc. 
+* The second dataset contains each review: including the business it corresponds to, the number of stars, the number of cool/funny/useful votes it recieved, and so on.  
+
+
+
+```{r, results='hide', warning=FALSE, include=FALSE}
+names(review)
+names(business)
+
+```
+
+I decided to join these two datasets by the variable "business_id" to make things easier...  
+
+```{r}
+#join the two datasets
+yelp <- inner_join(review, business, by = 'business_id') %>% select((1:33))
+names(yelp)
+
+```
+
+__________________________________________________________________________________________________________________
+
+
+## Exploratory Data Analysis
+
+### Votes (Cool, Funny, Useful)
+I first wanted to look at the "Cool", "Funny", and "Useful" votes, which are options that can be chosen by other Yelp users for each review.  
+
+
+```{r, warning=FALSE}
+
+#visualizing different "votes" via boxplot
+cool_plot <- ggplot(data = yelp) +
+  geom_boxplot(mapping = aes(x = "", y = cool), fill = "red") +
+  ylab("# of 'cool' votes") +
+  coord_flip()
+
+funny_plot <- ggplot(data = yelp) +
+  geom_boxplot(mapping = aes(x = "", y = funny), fill = "light green") +
+  ylab("# of 'funny' votes") +
+  coord_flip()
+
+useful_plot <- ggplot(data = yelp) +
+  geom_boxplot(mapping = aes(x = "", y = useful), fill = "light blue") +
+  ylab("# of 'useful' votes") +
+  coord_flip()
+
+grid.arrange(cool_plot, funny_plot, useful_plot, ncol = 1)
+
+```
+
+We can see that on average, the number of "Useful" votes for a given review is higher than that of "Cool" and "Funny" votes.   
+  
+Let's look a bit deeper into this:  
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+summary(yelp$cool)
+summary(yelp$funny)
+summary(yelp$useful)
+
+```
+  
+  
+So, the number of "Useful" votes for a review is generally higher than the number of "Cool" and "Funny" votes.  
+
+___________________________________________________________________________________________________________________
+
+
+### Number of Stars 
+Next, I wanted to visualize the number of stars given to each review, as well as the number of stars each individual business has.  
+Looking at the stars given to each review:  
+
+```{r, warning=FALSE}
+redvec <- c("#E6B0AA", "#D98880", "#CD6155", "#C0392B", "#A93226")
+
+ggplot(data = yelp) +
+  geom_bar(mapping = aes(x = stars, y = ..prop..), fill = redvec) +
+  ggtitle("Stars per Review") +
+  ylab("Proportion") +
+  xlab("Stars") +
+  theme(plot.title = element_text(size = 15), axis.title=element_text(face="bold"))
+
+
+```
+
+We can see that most reviews recieve a high number of stars.
+
+__________________________________________________________________________________________________________________
+
+
+```{r, include=FALSE, eval=FALSE, warning=FALSE}
+
+#create 2 new df
+#avg_by_user1 <- yelp %>% group_by(user_id) %>%
+ # summarize(avg_user_stars = mean(stars))
+
+#avg_by_user2 <- yelp %>% group_by(user_id)
+
+#round digits so theyre the same
+#(avg_by_user1$avg_user_stars <- signif(avg_by_user$avg_user_stars, digits = 3))
+#(avg_by_user2$reviewer_average_stars <- signif(avg_by_user2$reviewer_average_stars, digits = 3))
+
+#length(avg_by_user1$avg_user_stars)
+#length(avg_by_user2$reviewer_average_stars)
+
+#check if average_user_stars and reviever_average_stars are the same variable
+#avg_by_user$avg_user_stars == yelp$reviewer_average_stars
+
+```
+
+
+Now looking at businesses- I wanted to see if a particular geographic area gets a higher number of stars than the others. First I'll show the distribution of reviews in different areas.  
+I filtered by city, only including cities that have more than 100 reviews, so the barplot is easier to read.  
+
+
+```{r, warning=FALSE}
+
+group_by_city <- yelp %>% 
+  group_by(business_city.x) %>%
+  summarise(n = n()) %>%
+  filter(n > 100) %>%
+  arrange(desc(n))
+
+
+ggplot(data = group_by_city) +
+  geom_bar(mapping = aes(x = business_city.x, y = n), stat = "identity", fill = "#C0392B") +
+  ggtitle("Number of Reviews per City") +
+  xlab("City") +
+  ylab("# of Reviews") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12)) +
+  coord_flip()
+
+```
+
+As we would expect, the cities with the largest populations have the most reviews. 
+
+__________________________________________________________________________________________________________________
+
+
+Lets elaborate more on this idea, now looking at each individual business and its geographical area. To do this, I plotted each business based on its longitude and latitude on a map of Arizona.
+
+```{r, warning=FALSE}
+
+avg_review_by_business <- yelp %>% group_by(business_id) %>%
+  mutate(avg = mean(stars))
+
+state <- map_data("state")
+az <- state[state$region == "arizona", ]
+
+county <- map_data("county")
+county <- county[county$region == "arizona", ]
+
+#arizona map
+az_map <- ggplot() +
+  geom_polygon(data = az, mapping = aes(x = long, y = lat, group = group), color = "#D98880", fill = "white", lwd = 1.8) +
+  geom_polygon(data = county, mapping = aes(x = long, y = lat, group = group), color = "#D98880", fill = "white", lwd = 0.6) +
+  coord_quickmap() +
+  geom_point(data = avg_review_by_business, mapping = aes(x = business_longitude.x, y = business_latitude.x, size = stars), color = "#C0392B", alpha = 0.05) +
+  ggtitle("Avg # of Stars by Geographical Region") +
+  theme(plot.title = element_text(size = 15))
+
+
+#zoomed map
+zoomed_map <- ggplot() +
+  geom_polygon(data = az, mapping = aes(x = long, y = lat, group = group), color = "#D98880", fill = "white", lwd = 1.8) +
+  geom_polygon(data = county, mapping = aes(x = long, y = lat, group = group), color = "#D98880", fill = "white", lwd = 0.6) +
+  coord_quickmap(xlim = c(-113.75, -111), ylim = c(32.5, 34.8)) +
+  geom_point(data = avg_review_by_business, mapping = aes(x = business_longitude.x, y = business_latitude.x, size = stars), color = "#C0392B", alpha = 0.05)
+
+grid.arrange(az_map, zoomed_map, ncol = 2)
+
+```
+
+__________________________________________________________________________________________________________________
+
+
+### Sentiments 
+
+Next, I wanted to explore the sentiment of each review. 
+
+```{r, warning=FALSE, message=FALSE}
+
+yelp_tibble <- tibble(text = yelp$text, review_id = yelp$review_id) %>% mutate(text = as.character(text), review_index = row_number())
+
+#tokenize reviews
+token <- yelp_tibble %>% unnest_tokens(word, text, to_lower = TRUE)
+#remove stopwords
+no_stopwords <- token %>% anti_join(get_stopwords())
+
+#sentiments
+bing <- get_sentiments("bing")
+sentiments <- no_stopwords %>% inner_join(bing)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+#join sentiment dataset w/ main dataset
+all <- inner_join(yelp, sentiments, by = "review_id")
+
+```
+
+
+
+```{r, warning=FALSE}
+
+grouped_by_sentiment <- sentiments %>% group_by(sentiment) %>% mutate(count = n())
+
+#frequency of sentiments
+ggplot(data = grouped_by_sentiment) +
+  geom_bar(mapping = aes(x = sentiment, y = (..count..)/sum(..count..)), fill = c("#CD6155", "#A93226")) +
+  ggtitle("Negative vs. Positive Sentiment") +
+ xlab("Sentiment") +
+  ylab("Frequency") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+
+```
+
+We can see that the reviews predominantly have a positive sentiment, which makes sense, considering the frequency of "stars" given, (mostly 4's and 5's), as we explored previously.
+
+__________________________________________________________________________________________________________________
+
+Next, I wanted to look at the overall sentiment of each review, compared to the number of stars it was given, in order to see if there's any discrepancies.
+
+```{r, warning=FALSE}
+by_id <- all %>% group_by(review_id) %>% mutate(votes = cool + funny + useful)
+
+ggplot(data = by_id) +
+  geom_bar(mapping = aes(x = stars, y = (..count..)/sum(..count..), fill = sentiment)) +
+ggtitle("Sentiment by # of Stars") +
+ xlab("# of Stars") +
+  ylab("Frequency") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12)) +
+scale_fill_manual(values=c("#CD6155", "#A93226"))
+
+```
+
+As we would expect, as the number of stars gets higher, the proportion of positive reviews increases. What is surprising, however, is that for very low star ratings, such as *1 star*, the proportion of positive reviews is still ~50%. 
+
+
+
+```{r, warning=FALSE}
+
+pos_sentiment <- by_id %>% filter(sentiment == "positive")
+neg_sentiment <- by_id %>% filter(sentiment == "negative")
+
+#5 number summary for stars
+summary(pos_sentiment$stars)
+summary(neg_sentiment$stars)
+```
+
+So, the mean star rating is quite a bit higher for *positive* reviews than it is for *negative* reviews.
+
+__________________________________________________________________________________________________________________
+
+
+
+Looking at specific words, I decided to only look at reviews with higher ratings. So, I only looked at reviews that had above 3.272 stars, the average.
+```{r, warning=FALSE}
+
+mean_stars <- mean(all$stars)
+
+above_avg_stars <- all %>% group_by(word) %>% mutate(word_count = n())  %>% filter(stars > mean_stars, word_count > 10000)
+
+ggplot(data = above_avg_stars) +
+  geom_bar(mapping = aes(x = word, ..count.., fill = sentiment)) +
+  coord_flip() +
+  xlab("Word") +
+  ylab("Count") +
+  ggtitle("Top Words in Above-Average Rated Reviews") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+
+
+```
+
+  
+  
+We can see that the majority of above-average rated reviews have mostly positive words, as one would expect.
+
+__________________________________________________________________________________________________________________
+
+## Classification
+
+```{r, warning=FALSE}
+#boxplot of sentiment and total votes
+sentiment_box_1 <- ggplot(data = by_id) +
+  geom_boxplot(mapping = aes(x = sentiment, y = votes), linetype = 5, fill = "#E6B0AA") +
+  ylab("Total # of Votes") +
+  xlab("Sentiment") +
+  ylim(c(-10, 25)) +
+  ggtitle("Total Votes vs. Sentiment") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+  
+#boxplot of sentiment and stars
+sentiment_box_2 <- ggplot(data = by_id) +
+  geom_boxplot(mapping = aes(x = sentiment, y = stars), linetype = 5, fill = "#E6B0AA") +
+  ylab("# of Stars") +
+  xlab("Sentiment") +
+  ggtitle("Stars vs. Sentiment") +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+
+grid.arrange(sentiment_box_1, sentiment_box_2, ncol = 2)
+```
+
+Since the number of stars' distribution looks to differ more based on the sentiment, I decided to use # of stars in my logistic regression model for predicting the overall sentiment of a review.
+
+__________________________________________________________________________________________________________________
+
+### 10-Fold Cross Validation for Logistic Regression
+
+In order to choose the most accurate model, I'm using a 10-fold cross validation
+Because the polynomial degree of the "stars" variable needs to be less than the number of unique values, and the star ratings are 1-5, the degree must be less than or equal to 4 for this model. 
+
+```{r, warning=FALSE}
+
+set.seed(100)
+
+#transform sentiments to be 0 (negative) or 1 (positive)
+all <- all %>% mutate(binary_sentiment = ifelse(sentiment == "positive", 1, 0))
+
+error <- rep(1:4)
+
+#try polynomials 1-4
+for (i in 1:4) {
+
+logisticreg <- glm(binary_sentiment ~ poly(stars, i), family = binomial(), data = all)
+#mse vector
+error[i] <- cv.glm(all, logisticreg, K = 10)$delta[1]
+
+}
+
+error
+
+```
+
+```{r, warning=FALSE}
+
+#plot of mse and degree
+ggplot(mapping = aes(x = c(1:4), y = error)) +
+  geom_point() +
+  geom_line() +
+  xlab("Degree") +
+  ylab("10-Fold CV MSE") +
+  geom_point(mapping = aes(x = 3, y = 0.1817650), color = "red", size = 2.5) +
+  theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+
+```
+
+__________________________________________________________________________________________________________________
+
+### Final Logistic Regression Model
+
+Therefore, the final model is the one with the lowest Mean Squared Error:
+<span style="background-color: #C3C8CE">$sentiment = \alpha + stars + stars^2 + stars^3$t</span>
+
+```{r, warning=FALSE}
+
+final_logisticreg <- glm(binary_sentiment ~ poly(stars, 3), family = binomial(), data = all)
+summary(final_logisticreg)
+
+```
+
+__________________________________________________________________________________________________________________
+
+#### ROC Curve
+To decide the cutoff for classification, I'm using an ROC curve.
+```{r, warning=FALSE}
+
+#predicted values (probabilities)
+logit_prob <- predict(final_logisticreg, type = "response")
+
+#roc curve
+roc <- roc.curve(all$binary_sentiment, logit_prob)
+roc
+
+#find optimal cutoff
+cutoff <- optimalCutoff(all$binary_sentiment, logit_prob)
+cutoff
+
+```
+
+__________________________________________________________________________________________________________________
+
+#### Misclassification Rate
+```{r, results="hide", warning=FALSE}
+
+#classification
+classification <- ifelse(logit_prob > cutoff, "1", "0") %>% as.factor()
+all %>% mutate(classification = classification)
+
+#misclassification rate
+mean(all$binary_sentiment != classification)
+
+```
+
+```{r, warning=FALSE}
+
+incorrect_class <- all %>% group_by(stars) %>% summarize(prop_incorrect = (sum(binary_sentiment != classification))/ sum((binary_sentiment == classification) | (binary_sentiment != classification)))
+correct_class <- all %>% group_by(stars) %>% summarize(prop_correct = (sum(binary_sentiment == classification))/ sum((binary_sentiment == classification) | (binary_sentiment != classification)))
+
+
+ggplot(data = correct_class) +
+  geom_line(mapping = aes(x = stars, y = prop_correct), color = "#70ACFF", lwd = 1.3) +
+  xlab("Stars") +
+  ylab("Correct Classification Rate") +
+  ggtitle("Correct Classification Rate per Star Rating") +
+  ylim(c(0.45, 0.8)) +
+    theme(text = element_text(size = 10, face = "bold"), axis.text.y = element_text(angle = 380, hjust = 1), plot.title = element_text(size = 15), axis.title = element_text(size = 12))
+
+```
+  
+   
+So, as a review's star rating gets higher, it is easier to predict whether it's positive or negative.
